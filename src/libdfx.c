@@ -76,6 +76,8 @@ typedef struct {
         char *err_str;
 } dfx_err;
 
+// todo: these error codes should be mapped in the driver as to not break
+//       POSIX/LINUX standards when not using custom dmabuf
 static dfx_err zynqmp_err[] = {
 	[0] = { .err_code =  XFPGA_ERROR_CSUDMA_INIT_FAIL, .err_str = "Failed to initialize the CSUDMA module" },
 	[1] = { .err_code =  XFPGA_ERROR_PL_POWER_UP, .err_str = " Failed to power-up the PL" },
@@ -101,7 +103,8 @@ static dfx_err zynqmp_err[] = {
 	[21] = { .err_code =  XFPGA_ERROR_AES_DECRYPT_PL, .err_str = "Image AES decryption failed" },
 	[22] = { .err_code =  XFPGA_ERROR_CSU_PCAP_TRANSFER, .err_str = "PCAP failed to transfer the Image" },
 	[23] = { .err_code =  XFPGA_ERROR_PLSTATE_UNKNOWN, .err_str = "PL is in Unknow state" },
-	[23] = { .err_code =  XFPGA_ERROR_BITSTREAM_FORMAT, .err_str = "Bitstream format error" },
+	// todo: duplicate
+	// [23] = { .err_code =  XFPGA_ERROR_BITSTREAM_FORMAT, .err_str = "Bitstream format error" },
 	[24] = { .err_code =  XFPGA_ERROR_UNALIGN_ADDR, .err_str = "Error: Received Unaligned Bitstream address" },
 	[25] = { .err_code =  XFPGA_ERROR_AES_INIT, .err_str = "AES initialization failed" },
 	[26] = { .err_code =  XFPGA_ERROR_EFUSE_CHECK, .err_str = "Support only secure image configuration" },
@@ -236,7 +239,7 @@ int dfx_cfg_init_file(const char *dfx_bin_file, const char *dfx_dtbo_file,
 		      const char *devpath, unsigned long flags, ...)
 {
 	va_list args;
-	int len, ret = 0;
+	int ret = 0;
 	const char *cma_file = NULL;
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval t1, t0;
@@ -286,7 +289,6 @@ int dfx_cfg_load(int package_id)
 	int len, fd, buffd, ret = 0, err = 0;
 	char command[MAX_CMD_LEN];
 	char *str;
-	DIR *FD;
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval total_t1, total_t0, load_t1, load_t0;
 	double total_time, load_time;
@@ -305,7 +307,7 @@ int dfx_cfg_load(int package_id)
 		ret = -DFX_GET_PACKAGE_ERROR;
 		goto END;
 	}
-
+	// todo: why is is hardcoded fpga0?
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		fd = open("/dev/fpga0", O_RDWR);
 		if (fd < 0) {
@@ -332,8 +334,9 @@ int dfx_cfg_load(int package_id)
 		close(fd);
 	}
 
+	// TODO: remove hardcoded use of configfs
 	snprintf(command, sizeof(command),
-		 "/configfs/device-tree/overlays/%s_image_%d",
+		 "/configfs/device-tree/overlays/%s_image_%lu",
 		 package_node->package_name, package_node->package_id);
 
 	len = strlen(command) + 1;
@@ -354,6 +357,7 @@ int dfx_cfg_load(int package_id)
 #ifdef ENABLE_LIBDFX_TIME
 	gettimeofday(&load_t1, NULL);
 #endif
+	// todo: this is the dreaded state.txt... what the hell is it used for?
 
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		snprintf(command, sizeof(command),
@@ -373,7 +377,7 @@ int dfx_cfg_load(int package_id)
 			goto END;
 		}
 	}
-
+	// todo: state.txt
 	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
 		 package_node->load_image_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_image_dtbo_name);
@@ -433,9 +437,9 @@ int dfx_cfg_drivers_load(int package_id)
 		ret = -DFX_NO_VALID_DRIVER_DTO_FILE;
 		goto END;
 	}
-
+	// todo: hardcoded configfs
 	snprintf(command, sizeof(command),
-		 "/configfs/device-tree/overlays/%s_driver_%d",
+		 "/configfs/device-tree/overlays/%s_driver_%lu",
 		 package_node->package_name, package_node->package_id);
 	len = strlen(command) + 1;
 	str = (char *) calloc((len), sizeof(char));
@@ -448,7 +452,7 @@ int dfx_cfg_drivers_load(int package_id)
 		 package_node->load_drivers_dtbo_name,
 		 package_node->load_drivers_overlay_pck_path);
 	system(command);
-
+	// todo: dreaded state.txt
 	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
 		 package_node->load_drivers_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_drivers_dtbo_name);
@@ -562,6 +566,7 @@ int dfx_cfg_destroy(int package_id)
 	}
 
 	if (package_node->load_image_overlay_pck_path != NULL) {
+		// todo: this deletes on remove, we should not need to do this any more
 		snprintf(command, sizeof(command), "rm /lib/firmware/%s",
 			 package_node->load_image_dtbo_name);
 		system(command);
@@ -662,7 +667,8 @@ int dfx_get_meta_header(char *binfile, int *buffer, int buf_size)
 		ret = -DFX_INVALID_PLATFORM_ERROR;
 		goto END;
 	}
-
+	// todo: binfile here we know the path to the source file -
+	//	 this is what is copied into /lib/firmware
 	fd = fopen(binfile, "rb");
 	if (!fd) {
 		printf("Unable to open binary file!");
@@ -720,6 +726,8 @@ END:
 
 static int read_package_folder(struct dfx_package_node *package_node)
 {
+	// TODO: HUGE - this whole function is used to populate the data
+	//	 - needs to be fixed
 	int bin_count = 0, dtbo_count = 0, driver_dtbo_count = 0, nky_count = 0;
 	char command[MAX_CMD_LEN];
 	struct dirent *dir;
@@ -778,6 +786,7 @@ static int read_package_folder(struct dfx_package_node *package_node)
 							sizeof(char));
 					strcpy(str, package_node->package_path);
 					strcat(str, dir->d_name);
+					// todo: here writes dtbo path
 					package_node->load_image_dtbo_path =
 									str;
 					str = (char *) calloc((len + 1),
@@ -808,6 +817,7 @@ static int read_package_folder(struct dfx_package_node *package_node)
 							sizeof(char));
 					strcpy(str, package_node->package_path);
 					strcat(str, dir->d_name);
+					// todo: here writes dtbo path
 					package_node->load_image_dtbo_path =
 									str;
 					str = (char *) calloc((len + 1),
@@ -871,11 +881,14 @@ static int read_package_folder(struct dfx_package_node *package_node)
 		str = (char *) calloc((len), sizeof(char));
 		strncpy(str, command, len);
 		package_node->package_name = str;
+		// todo: this looks in /lib/firmware also
+		// todo: here load_image_dtbo_path is bad from where it is written
 		snprintf(command, sizeof(command), "cp %s /lib/firmware/",
 			 package_node->load_image_dtbo_path);
 		system(command);
 
 		if (package_node->load_drivers_dtbo_path != NULL) {
+			// todo: this should set the lookup path, not make a copy in /lib/firmware
 			snprintf(command, sizeof(command),
 				 "cp %s /lib/firmware/",
 				 package_node->load_drivers_dtbo_path);
@@ -893,17 +906,20 @@ static struct dfx_package_node *create_package()
 {
 	FPGA_NODE *package_node;
 	DIR *FD;
-
+	// todo: bad use of hardcoded path here
 	FD = opendir("/lib/firmware");
 	if (FD)
 		closedir(FD);
 	else
+		// todo: bad use of hardcoded path here
 		system("mkdir -p /lib/firmware");
-
+	// TODO: hardcoded configfs
 	FD = opendir("/configfs/device-tree/overlays/");
 	if (FD)
 		closedir(FD);
 	else {
+		// TODO: hardcoded configfs
+		// todo: should not be mounting in our version
 		system("mkdir -p /configfs");
 		system("mount -t configfs configfs /configfs");
 	}
@@ -1004,6 +1020,8 @@ static int destroy_package(int package_id)
 
 static int dfx_state(char *cmd, char *state)
 {
+	// TODO: remove this whole logical process, or add relative path for
+	//	 state.txt so we can fix it in a layout
 	char buf[PLATFORM_STR_LEN];
 	FILE *fptr;
 	int len;
@@ -1026,6 +1044,8 @@ static int dfx_state(char *cmd, char *state)
 
 static int dfx_get_error(char *cmd)
 {
+	// TODO: remove this whole logical process, or add relative path for
+	//	 state.txt so we can fix it in a layout
 	char string[PLATFORM_STR_LEN];
 	FILE *fp;
 	int c;
@@ -1048,9 +1068,9 @@ static int dfx_get_error(char *cmd)
 static int dfx_package_load_dmabuf(struct dfx_package_node *package_node,
 				   const char *cma_file)
 {
-	int word_align = 0, index, fd, ret;
+	// todo: note: this function accesses "load_image_path".
+	int word_align = 0, index, ret;
 	struct dma_buf_sync sync = { 0 };
-	struct dma_buffer_info info;
 	long fileLen, count;
 	char *dma_buf;
 	FILE *fp;
@@ -1139,7 +1159,7 @@ static int dfx_getplatform(void)
 	char *Versalstr = "Xilinx Versal FPGA Manager";
 	char fpstr[PLATFORM_STR_LEN];
 	FILE *fptr;
-
+	// always fpga0?
 	fptr = fopen("/sys/class/fpga_manager/fpga0/name", "r");
 	if (fptr == NULL) {
 		printf("Error! opening the platform file");
@@ -1331,7 +1351,6 @@ static int read_package_byname(struct dfx_package_node *package_node,
 			       const char *dfx_driver_dtbo_file,
 			       const char *dfx_aes_key_file)
 {
-	int ret;
 	char *str;
 	char slen;
 
@@ -1339,6 +1358,7 @@ static int read_package_byname(struct dfx_package_node *package_node,
 		package_node->load_image_path = strdup(dfx_bin_file);
 		str = strdup(get_file_name_from_path(package_node->load_image_path));
 		package_node->load_image_name = str;
+		// todo: here is a call to copy file to /lib/firmware
 		copy_file_to_firmware(dfx_bin_file);
 	} else {
 		return -DFX_READ_PACKAGE_ERROR;
@@ -1352,6 +1372,7 @@ static int read_package_byname(struct dfx_package_node *package_node,
 		str = strndup(package_node->load_image_dtbo_name, slen);
 		str[slen - 1] = '\0';
 		package_node->package_name = str;
+		// todo: here is a call to copy file to /lib/firmware
 		copy_file_to_firmware(dfx_dtbo_file);
 	} else {
 		return -DFX_READ_PACKAGE_ERROR;
@@ -1361,6 +1382,7 @@ static int read_package_byname(struct dfx_package_node *package_node,
 		package_node->load_drivers_dtbo_path = strdup(dfx_driver_dtbo_file);
 		str = strdup(get_file_name_from_path(package_node->load_drivers_dtbo_path));
 		package_node->load_drivers_dtbo_name = str;
+		// todo: here is a call to copy file to /lib/firmware
 		copy_file_to_firmware(dfx_driver_dtbo_file);
 	} else {
 		package_node->load_drivers_dtbo_path = NULL;
@@ -1398,7 +1420,7 @@ static char *get_file_name_from_path(char *full_path)
 static void copy_file_to_firmware(const char *file)
 {
 	char command[MAX_CMD_LEN];
-
+	// TODO: this hardcoded path shouldn't be necessary - search for usages.
 	snprintf(command, sizeof(command), "cp %s /lib/firmware/", file);
 	system(command);
 }
