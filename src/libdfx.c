@@ -287,6 +287,7 @@ int dfx_cfg_load(int package_id)
 	char command[MAX_CMD_LEN];
 	char *str;
 	DIR *FD;
+	DIR *state_dir;
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval total_t1, total_t0, load_t1, load_t0;
 	double total_time, load_time;
@@ -355,9 +356,15 @@ int dfx_cfg_load(int package_id)
 	gettimeofday(&load_t1, NULL);
 #endif
 
+	state_dir = opendir("/run/dfx");
+	if (state_dir)
+		closedir(state_dir);
+	else
+		system("mkdir -p /run/dfx");
+
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		snprintf(command, sizeof(command),
-			 "cat /sys/class/fpga_manager/fpga0/state >> state.txt");
+			 "cat /sys/class/fpga_manager/fpga0/state >> /run/dfx/state.txt");
 		ret = dfx_state(command, "operating");
 		if (ret) {
 			err = dfx_get_error(command);
@@ -374,7 +381,7 @@ int dfx_cfg_load(int package_id)
 		}
 	}
 
-	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
+	snprintf(command, sizeof(command), "cat %s/path >> /run/dfx/state.txt",
 		 package_node->load_image_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_image_dtbo_name);
 	if (ret) {
@@ -410,6 +417,7 @@ int dfx_cfg_drivers_load(int package_id)
 	char command[MAX_CMD_LEN];
 	int len, ret = 0;
 	char *str;
+	DIR *state_dir;
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval t1, t0;
 	double time;
@@ -449,7 +457,13 @@ int dfx_cfg_drivers_load(int package_id)
 		 package_node->load_drivers_overlay_pck_path);
 	system(command);
 
-	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
+	state_dir = opendir("/run/dfx");
+	if (state_dir)
+		closedir(state_dir);
+	else
+		system("mkdir -p /run/dfx");
+
+	snprintf(command, sizeof(command), "cat %s/path >> /run/dfx/state.txt",
 		 package_node->load_drivers_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_drivers_dtbo_name);
 	if (ret) {
@@ -1007,14 +1021,21 @@ static int dfx_state(char *cmd, char *state)
 	char buf[PLATFORM_STR_LEN];
 	FILE *fptr;
 	int len;
+	DIR * state_dir;
+
+	state_dir = opendir("/run/dfx");
+	if (state_dir)
+		closedir(state_dir);
+	else
+		system("mkdir -p /run/dfx");
 
 	system(cmd);
 	len = strlen(state) + 1;
-	fptr = fopen("state.txt", "r");
+	fptr = fopen("/run/dfx/state.txt", "r");
 	if (fptr) {
 		fgets(buf, len, fptr);
 		fclose(fptr);
-		system("rm state.txt");
+		system("rm /run/dfx/state.txt");
 		if (!strcmp(buf, state))
 			return 0;
 		else
@@ -1029,9 +1050,16 @@ static int dfx_get_error(char *cmd)
 	char string[PLATFORM_STR_LEN];
 	FILE *fp;
 	int c;
+	DIR * state_dir;
+
+	state_dir = opendir("/run/dfx");
+	if (state_dir)
+		closedir(state_dir);
+	else
+		system("mkdir -p /run/dfx");
 
 	system(cmd);
-	fp = fopen("state.txt", "r");
+	fp = fopen("/run/dfx/state.txt", "r");
 	c = getc(fp);
 	while(c!=EOF) {
 		fscanf(fp, "%s", string);
@@ -1040,7 +1068,7 @@ static int dfx_get_error(char *cmd)
 
 	fclose(fp);
 
-	system("rm state.txt");
+	system("rm /run/dfx/state.txt");
 
     return (int)strtol(string, NULL, 0);
 }
