@@ -357,11 +357,9 @@ int dfx_cfg_load(int package_id)
 #ifdef ENABLE_LIBDFX_TIME
 	gettimeofday(&load_t1, NULL);
 #endif
-	// todo: this is the dreaded state.txt... what the hell is it used for?
-
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		snprintf(command, sizeof(command),
-			 "cat /sys/class/fpga_manager/fpga0/state >> state.txt");
+			 "cat /sys/class/fpga_manager/fpga0/state >> /etc/dfx-mgrd/state.txt");
 		ret = dfx_state(command, "operating");
 		if (ret) {
 			err = dfx_get_error(command);
@@ -377,8 +375,7 @@ int dfx_cfg_load(int package_id)
 			goto END;
 		}
 	}
-	// todo: state.txt
-	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
+	snprintf(command, sizeof(command), "cat %s/path >> /etc/dfx-mgrd/state.txt",
 		 package_node->load_image_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_image_dtbo_name);
 	if (ret) {
@@ -452,8 +449,7 @@ int dfx_cfg_drivers_load(int package_id)
 		 package_node->load_drivers_dtbo_name,
 		 package_node->load_drivers_overlay_pck_path);
 	system(command);
-	// todo: dreaded state.txt
-	snprintf(command, sizeof(command), "cat %s/path >> state.txt",
+	snprintf(command, sizeof(command), "cat %s/path >> /etc/dfx-mgrd/state.txt",
 		 package_node->load_drivers_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_drivers_dtbo_name);
 	if (ret) {
@@ -1020,19 +1016,17 @@ static int destroy_package(int package_id)
 
 static int dfx_state(char *cmd, char *state)
 {
-	// TODO: remove this whole logical process, or add relative path for
-	//	 state.txt so we can fix it in a layout
 	char buf[PLATFORM_STR_LEN];
 	FILE *fptr;
 	int len;
 
 	system(cmd);
 	len = strlen(state) + 1;
-	fptr = fopen("state.txt", "r");
+	fptr = fopen("/etc/dfx-mgrd/state.txt", "r");
 	if (fptr) {
 		fgets(buf, len, fptr);
 		fclose(fptr);
-		system("rm state.txt");
+		system("rm /etc/dfx-mgrd/state.txt");
 		if (!strcmp(buf, state))
 			return 0;
 		else
@@ -1044,14 +1038,12 @@ static int dfx_state(char *cmd, char *state)
 
 static int dfx_get_error(char *cmd)
 {
-	// TODO: remove this whole logical process, or add relative path for
-	//	 state.txt so we can fix it in a layout
 	char string[PLATFORM_STR_LEN];
 	FILE *fp;
 	int c;
 
 	system(cmd);
-	fp = fopen("state.txt", "r");
+	fp = fopen("/etc/dfx-mgrd/state.txt", "r");
 	c = getc(fp);
 	while(c!=EOF) {
 		fscanf(fp, "%s", string);
@@ -1060,7 +1052,7 @@ static int dfx_get_error(char *cmd)
 
 	fclose(fp);
 
-	system("rm state.txt");
+	system("rm /etc/dfx-mgrd/state.txt");
 
     return (int)strtol(string, NULL, 0);
 }
