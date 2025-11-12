@@ -307,7 +307,7 @@ int dfx_cfg_load(int package_id)
 		ret = -DFX_GET_PACKAGE_ERROR;
 		goto END;
 	}
-	// todo: why is is hardcoded fpga0?
+
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		fd = open("/dev/fpga0", O_RDWR);
 		if (fd < 0) {
@@ -334,9 +334,8 @@ int dfx_cfg_load(int package_id)
 		close(fd);
 	}
 
-	// TODO: remove hardcoded use of configfs
 	snprintf(command, sizeof(command),
-		 "/configfs/device-tree/overlays/%s_image_%lu",
+		 "/sys/kernel/config/device-tree/overlays/%s_image_%lu",
 		 package_node->package_name, package_node->package_id);
 
 	len = strlen(command) + 1;
@@ -434,9 +433,8 @@ int dfx_cfg_drivers_load(int package_id)
 		ret = -DFX_NO_VALID_DRIVER_DTO_FILE;
 		goto END;
 	}
-	// todo: hardcoded configfs
 	snprintf(command, sizeof(command),
-		 "/configfs/device-tree/overlays/%s_driver_%lu",
+		 "/sys/kernel/config/device-tree/overlays/%s_driver_%lu",
 		 package_node->package_name, package_node->package_id);
 	len = strlen(command) + 1;
 	str = (char *) calloc((len), sizeof(char));
@@ -909,15 +907,12 @@ static struct dfx_package_node *create_package()
 	else
 		// todo: bad use of hardcoded path here
 		system("mkdir -p /lib/firmware");
-	// TODO: hardcoded configfs
-	FD = opendir("/configfs/device-tree/overlays/");
+
+	FD = opendir("/sys/kernel/config/device-tree/overlays/");
 	if (FD)
 		closedir(FD);
 	else {
-		// TODO: hardcoded configfs
-		// todo: should not be mounting in our version
-		system("mkdir -p /configfs");
-		system("mount -t configfs configfs /configfs");
+		return 0;
 	}
 
 	temp_node = first_node;
