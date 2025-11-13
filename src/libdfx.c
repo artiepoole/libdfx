@@ -338,6 +338,9 @@ int dfx_cfg_load(int package_id)
 		 "/sys/kernel/config/device-tree/overlays/%s_image_%lu",
 		 package_node->package_name, package_node->package_id);
 
+
+	set_firmware_lookup_path_for_file(package_node->load_image_path);
+
 	len = strlen(command) + 1;
 	str = (char *) calloc((len), sizeof(char));
 	strncpy(str, command, len);
@@ -374,6 +377,7 @@ int dfx_cfg_load(int package_id)
 			goto END;
 		}
 	}
+
 	snprintf(command, sizeof(command), "cat %s/path >> /etc/dfx-mgrd/state.txt",
 		 package_node->load_image_overlay_pck_path);
 	ret = dfx_state(command, package_node->load_image_dtbo_name);
@@ -383,7 +387,7 @@ int dfx_cfg_load(int package_id)
 		system(command);
 		printf("%s: Image configuration failed\n", __func__);
 		ret = -DFX_IMAGE_CONFIG_ERROR;
-		goto END;
+		set_firmware_lookup_path_for_file("");
 	}
 
 END:
@@ -980,7 +984,6 @@ static int dfx_state(char *cmd, char *state)
 	char buf[PLATFORM_STR_LEN];
 	FILE *fptr;
 	int len;
-
 	system(cmd);
 	len = strlen(state) + 1;
 	fptr = fopen("/etc/dfx-mgrd/state.txt", "r");
@@ -988,6 +991,7 @@ static int dfx_state(char *cmd, char *state)
 		fgets(buf, len, fptr);
 		fclose(fptr);
 		system("rm /etc/dfx-mgrd/state.txt");
+		printf("dfx_state: expected `%s` and got `%s`\n", state, buf);
 		if (!strcmp(buf, state))
 			return 0;
 		else
@@ -1027,7 +1031,7 @@ static int dfx_package_load_dmabuf(struct dfx_package_node *package_node,
 	long fileLen, count;
 	char *dma_buf;
 	FILE *fp;
-
+	printf("dfx_package_load_dmabuf: called with file name: %s\n", package_node->load_image_path);
 	fp = fopen(package_node->load_image_path, "rb");
 	if (fp == NULL) {
 		printf("%s: File open failed\n", __func__);
@@ -1381,7 +1385,7 @@ static void set_firmware_lookup_path_for_file(const char* file_path) {
 
 	// get parent dir
 	char *parent_dir = dirname(path_copy);
-
+	printf("set_firmware_lookup_path_for_file called with %s\n", parent_dir);
 
 	int fd = open("/sys/module/firmware_class/parameters/path", O_WRONLY);
 	if (fd < 0) {
@@ -1395,9 +1399,8 @@ static void set_firmware_lookup_path_for_file(const char* file_path) {
 		close(fd);
 		return;
 	}
+	printf("set_firmware_lookup_path_for_file: wrote %s to /sys/module/firmware_class/parameters/path\n", parent_dir);
 
-	// Append newline for kernel sysfs expectations
-	write(fd, "\n", 1);
 	close(fd);
 }
 
