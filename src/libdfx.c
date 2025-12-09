@@ -46,6 +46,33 @@
 
 #define ZYNQMP_MAX_ERR	27U
 
+#ifndef DTBO_ROOT_DIR
+#define DTBO_ROOT_DIR "/sys/kernel/config/device-tree/overlays"
+#endif
+
+/**
+ * Convenience macros LIB_ERR, LIB_PR, LIB_DBG to add source
+ * function name and the line number before the message.
+ * Inspired by pr_err, etc. in the kernel's printk.h.
+ */
+#ifdef errno
+#define LIB_ERR(fmt, args ...) do { fprintf(stderr, \
+"LIBDFX> ERROR:%s():%u " fmt ": %s\n", \
+__func__, __LINE__, ##args, errno ? strerror(errno) : ""); \
+} while (0)
+#else /* errno */
+#define LIB_ERR(fmt, args ...) fprintf(stderr, \
+"LIBDFX> ERROR:%s():%u " fmt "\n", \
+__func__, __LINE__, ##args)
+#endif /* errno */
+#define LIB_PR(fmt, args ...) printf("LIBDFX> %s():%u " fmt "\n", \
+__func__, __LINE__, ##args)
+#ifdef DEBUG
+#define LIB_DBG DFX_PR
+#else
+#define LIB_DBG(fmt, args ...)
+#endif /* DEBUG */
+
 struct dfx_package_node {
 	int  flags;
 	int  xilplatform;
@@ -111,14 +138,13 @@ static struct dfx_package_node *create_package(void);
 static struct dfx_package_node *get_package(int package_id);
 static int destroy_package(int package_id);
 static int read_package_folder(struct dfx_package_node *package_node);
-static int dfx_state(char *cmd, char *state);
 static int dfx_package_load_dmabuf(struct dfx_package_node *package_node,
 				   const char *cma_file);
 static int dfx_getplatform(void);
 static int find_key(struct dfx_package_node *package_node);
 static int lengthOfLastWord2(const char *input);
 static void strlwr(char *destination, const char *source);
-static int dfx_get_error(char *cmd);
+static int dfx_get_error(const char *state_buf);
 static void zynqmp_print_err_msg(int err);
 static int dfx_cfg_init_common(const char *dfx_package_path, const char *cma_file,
 			       const char *dfx_bin_file, const char *dfx_dtbo_file,
@@ -138,6 +164,305 @@ static bool file_exists(const char *filename);
 static inline double gettime(struct timeval  t0, struct timeval t1);
 #endif
 
+static void strip_trailing(char *haystack, char needle);
+static int read_single_line(const char *path, char *buffer, size_t buf_size);
+static int write_string_to_file(const char *path, const char *src);
+static void remove_overlay_dir(const char *dir);
+
+/**
+ * strip_trailing() - Remove one trailing character from a string
+ * @haystack:	 The null-terminated string to modify (in-place).
+ * @needle:  The character to remove from the end of the string.
+ *
+ * Strips trailing needle from haystack - e.g. `\n` from file read
+ * results or `/` from paths before concatenating.
+ */
+static void strip_trailing(char *haystack, const char needle)
+{
+	if (!haystack)
+		return;
+
+	const size_t len = strlen(haystack);
+	if (len == 0)
+		return;
+
+	if (haystack[len - 1] == needle) {
+		haystack[len - 1] = '\0';
+	}
+}
+
+/**
+ * read_single_line() - Read a single line from a file into a buffer.
+ *
+ * @path:			path of the file to read from
+ * @buffer:			buffer to write the data into
+ * @buf_size:		length of the provided `buffer` in bytes
+ *
+ * Reads exactly one line (up to newline or EOF) from @path.
+ * Trailing newline is removed if present.
+ *
+ * Return:	0 on success
+ *			-1 on failure
+ */
+static int read_single_line(const char *path,
+							char *buffer,
+							const size_t buf_size)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		LIB_ERR("Failed to open `%s` for reading", path);
+		return -1;
+	}
+
+	if (!fgets(buffer, (int) buf_size, f)) {
+		LIB_ERR("Failed to read from `%s`", path);
+		fclose(f);
+		return -1;
+	}
+
+	if (fclose(f) != 0) {
+		LIB_ERR("Failed to close `%s`", path);
+		return -1;
+	}
+
+	strip_trailing(buffer, '\n');
+	return 0;
+}
+
+/**
+ * write_string_to_file() - Write a string to a file safely
+ * @path:	Path to the file to write
+ * @src:	Null-terminated buffer containing the string to write
+ *
+ * This function opens @path for writing, writes the contents of @data,
+ * and closes the file. All steps are checked for errors. On failure,
+ * a detailed error message including errno is logged.
+ *
+ * Return:	0 on success
+ *			-1 on failure
+ */
+static int write_string_to_file(const char *path, const char *src)
+{
+	FILE *f = fopen(path, "w");
+	if (!f) {
+		LIB_ERR("Failed to open `%s` for writing", path);
+		return -1;
+	}
+
+	if (fputs(src, f) == EOF) {
+		LIB_ERR("Failed to write to `%s`", path);
+		fclose(f); // attempt to close anyway
+		return -1;
+	}
+
+	if (fclose(f) != 0) {
+		LIB_ERR("Failed to close `%s` after writing", path);
+		return -1;
+	}
+
+	LIB_DBG("`%s` written to `%s`", data, path);
+	return 0;
+}
+
+/**
+ * remove_overlay_dir() - remove device tree overlay from configfs interface.
+ *
+ * @dir:	the overlay directory to be removed
+ *
+ * This function attempts to remove the directory provided, with additional logging.
+ *
+ */
+static void remove_overlay_dir(const char *dir)
+{
+	if (rmdir(dir) != 0) {
+		LIB_ERR("Failed to remove directory `%s`", dir);
+	} else {
+		LIB_DBG("Directory `%s` removed", dir);
+	}
+}
+
+/**
+ * fpga_state() - read the fpga state into `buffer`
+ *
+ * @buffer:			buffer to write the state into
+ * @buf_size:		length of the provided `buffer` in bytes
+ *
+ * This static function checks the operational state of the FPGA by reading
+ * the state from the sysfs interface.
+ *
+ * Return:	number of bytes read on success
+ *			-1 on failure
+ */
+int dfx_get_fpga_state(char *buffer, const size_t buf_size)
+{
+	const char *state_file_path = "/sys/class/fpga_manager/fpga0/state";
+	return read_single_line(state_file_path, buffer, sizeof(char) * buf_size);
+}
+
+/**
+ * dfx_set_overlay_path(...) - write a requested overlay path to configfs
+ *
+ * @overlay_dir:	  Path to the overlay directory in configfs.
+ * @requested_path:   The overlay path to write to the `path` attribute.
+ *
+ * This function writes the specified overlay path to the overlay's `path`
+ * attribute in configfs. It attempts to write `requested_path` into the
+ * `<overlay_dir>/path` file.
+ *
+ * Return:	0 on success,
+ *			-1 on error (e.g., failed to open, write, or close the file)
+ */
+int dfx_set_overlay_path(const char *overlay_dir, const char *requested_path)
+{
+	char full_path[256];
+	if (sizeof(full_path) < strlen(overlay_dir) + 6) { // '/' + '\0' + "path"
+		LIB_ERR("Resulting path `%s` is too long for internal buffer (max: %d)",
+				overlay_dir,
+				MAX_CMD_LEN);
+		return -1;
+	}
+
+	strcpy(full_path, overlay_dir);
+	strip_trailing(full_path, '/');
+	strcat(full_path, "/path");
+
+	if (write_string_to_file(full_path, requested_path)) {
+		LIB_ERR("Failed to apply the overlay - could not write to path file");
+		return -1;
+	}
+	return 0;
+}
+
+/**
+ * dfx_set_fpga_firmware(...) - write a firmware binary name to the FPGA
+ * manager
+ *
+ * @requested_binary_name: name of the firmware binary to load
+ *
+ * This function writes the specified firmware binary name to the FPGA manager's
+ * firmware attribute in sysfs (`/sys/class/fpga_manager/fpga0/firmware`). This
+ * triggers the FPGA manager to load the specified firmware onto the FPGA. All
+ * file operations (open, write, close) are checked, and detailed error messages
+ * including errno are reported if any operation fails.
+ *
+ * Return:	0 on success (firmware name successfully written),
+ *			-1 on error (e.g., failed to open, write, or close the sysfs file)
+ */
+int dfx_set_fpga_firmware(const char *requested_binary_name)
+{
+	if (write_string_to_file("/sys/class/fpga_manager/fpga0/firmware",
+							 requested_binary_name)) {
+		LIB_ERR("Failed to write the bitstream -"
+				" could not write to firmware file");
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ * dfx_set_fpga_flags(...) - write a firmware binary name to the FPGA manager
+ *
+ * @flags: flag value to write - see user_load for more information.
+ *
+ * This function converts `flags` to a hex formatted string before writing
+ * that string to the fpga flags attribute
+ * (`/sys/class/fpga_manager/fpga0/flags`)
+ *
+ * Return:	0 on success (firmware name successfully written),
+ *			-1 on error (e.g., failed to open, write, or close the sysfs file)
+ */
+int dfx_set_fpga_flags(const int flags)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%x", flags); // convert to hex
+	if (write_string_to_file("/sys/class/fpga_manager/fpga0/flags", buf)) {
+		LIB_ERR("Failed to set fpga flags - could not write to flags file");
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ * dfx_set_fpga_key(...) - write a AES key to the FPGA via the sysfs
+ * interface
+ *
+ * @key: AES key string to write
+ *
+ * Return:	0 on success (key successfully written),
+ *			-1 on error (e.g., failed to open, write, or close the sysfs file)
+ */
+int dfx_set_fpga_key(const char *key)
+{
+	if (write_string_to_file("/sys/class/fpga_manager/fpga0/key", key)) {
+		LIB_ERR("Failed to set fpga flags - could not write to flags file");
+		return -1;
+	}
+
+	return 0;
+}
+
+
+
+/**
+ * dfx_set_overlay_path(...) - read an overlay's path variable into
+ * `dest_buffer`
+ *
+ * @overlay_dir:	path to the overlay directory in configfs
+ * @buffer:			buffer to write the path into
+ * @buf_size:		length of the provided `buffer` in bytes
+ *
+ * Return:	number of bytes read on success
+ *			-1 on failure
+ */
+int dfx_get_overlay_path(const char *overlay_dir, char *buffer,
+						 const size_t buf_size)
+{
+	char full_path[MAX_CMD_LEN];
+	if (sizeof(full_path) < strlen(overlay_dir) + 6) { // + '/' + '\0' + "path"
+		LIB_ERR("Resulting path `%s` is too long for internal buffer (max: %d)",
+				overlay_dir,
+				MAX_CMD_LEN);
+		return -1;
+	}
+
+	strcpy(full_path, overlay_dir);
+	strip_trailing(full_path, '/');
+	strcat(full_path, "/path");
+
+	return read_single_line(full_path, buffer, buf_size);
+}
+
+/**
+ * dfx_set_overlay_path(...) - read an overlay's status variable into
+ * `dest_buffer`
+ *
+ * @overlay_dir:	path to the overlay directory in configfs
+ * @buffer:			buffer to write the status into
+ * @buf_size:		length of the provided `buffer` in bytes
+ *
+ * Return:	number of bytes read on success
+ *			-1 on failure
+ */
+int dfx_get_overlay_status(const char *overlay_dir, char *buffer,
+						   const size_t buf_size)
+{
+	char full_path[MAX_CMD_LEN];
+	if (sizeof(full_path) < strlen(overlay_dir) + 8) { // '/' + '\0' + "status"
+		LIB_ERR("Resulting path `%s` is too long for internal buffer (max: %d)",
+				overlay_dir,
+				MAX_CMD_LEN);
+		return -1;
+	}
+
+	strcpy(full_path, overlay_dir);
+	strip_trailing(full_path, '/');
+	strcat(full_path, "/status");
+
+	return read_single_line(full_path, buffer, buf_size);
+}
+
 /* Provide a generic interface to the user to specify the required parameters
  * for the library.The calling process must call this API before it performs
  * fpga-load/remove.
@@ -154,7 +479,8 @@ static inline double gettime(struct timeval  t0, struct timeval t1);
  * Optional parameters (using variadic arguments):
  * char *cma_file: (Optional) Custom CMA file path for DMA buffer allocation.
  *                 If NULL or not provided, defaults to standard paths:
- *                 "/dev/dma_heap/reserved" or "/dev/dma_heap/cma_reserved@800000000"
+ *                 "/dev/dma_heap/reserved" or
+ * "/dev/dma_heap/cma_reserved@800000000"
  *
  * Return: returns unique package_Id, or Error code on failure.
  */
@@ -283,10 +609,9 @@ int dfx_cfg_load(int package_id)
 {
 	FPGA_NODE *package_node;
 	int len, fd, buffd, ret = 0, err = 0;
-	char command[MAX_CMD_LEN];
-	char *str;
-	DIR *FD;
-	DIR *state_dir;
+	char path_buf[MAX_CMD_LEN];
+	char *overlay_dir_path;
+	char state_buf[128] = {};
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval total_t1, total_t0, load_t1, load_t0;
 	double total_time, load_time;
@@ -309,90 +634,75 @@ int dfx_cfg_load(int package_id)
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
 		fd = open("/dev/fpga0", O_RDWR);
 		if (fd < 0) {
-			printf("%s: Cannot open device file...\n",
-			       __func__);
+			printf("%s: Cannot open device file...\n", __func__);
 			ret = -DFX_FAIL_TO_OPEN_DEV_NODE;
 			goto END;
 		}
-
-		snprintf(command, sizeof(command),
-			 "echo %x > /sys/class/fpga_manager/fpga0/flags",
-			 package_node->flags);
-		system(command);
+		// todo(artiepoole): handle errors
+		dfx_set_fpga_flags(package_node->flags);
 		if (package_node->flags & DFX_ENCRYPTION_USERKEY_EN) {
-			snprintf(command, sizeof(command),
-				 "echo %s > /sys/class/fpga_manager/fpga0/key",
-				 package_node->aes_key);
-			system(command);
+			// todo(artiepoole): handle errors
+			dfx_set_fpga_key(package_node->aes_key);
 		}
 
-		buffd = package_node->dmabuf_info->dma_buffd;
-		/* Send dmabuf-fd to the FPGA Manager */
-		ioctl(fd, DFX_IOCTL_LOAD_DMA_BUFF, &buffd);
-		close(fd);
-	}
+        buffd = package_node->dmabuf_info->dma_buffd;
+        /* Send dmabuf-fd to the FPGA Manager */
+        ioctl(fd, DFX_IOCTL_LOAD_DMA_BUFF, &buffd);
+        close(fd);
+    }
 
-	snprintf(command, sizeof(command),
-		 "/sys/kernel/config/device-tree/overlays/%s_image_%lu",
-		 package_node->package_name, package_node->package_id);
+	snprintf(path_buf, sizeof(path_buf), "%s/%s_image_%lu", DTBO_ROOT_DIR,
+			 package_node->package_name, package_node->package_id);
 
-
+	// TODO(artiepoole): handle errors
 	dfx_set_firmware_lookup_path(package_node->load_image_path);
 
-	len = strlen(command) + 1;
-	str = (char *) calloc((len), sizeof(char));
-	strncpy(str, command, len);
-	package_node->load_image_overlay_pck_path = str;
-	snprintf(command, sizeof(command), "mkdir -p %s",
-		 package_node->load_image_overlay_pck_path);
-	system(command);
+	len = strlen(path_buf) + 1;
+	overlay_dir_path = (char *) calloc(len, sizeof(char));
+	strncpy(overlay_dir_path, path_buf, len);
+	package_node->load_image_overlay_pck_path = overlay_dir_path;
+	if (mkdir(package_node->load_image_overlay_pck_path, 0755)) {
+		LIB_ERR("Failed to create overlay dir `%s`",
+				package_node->load_image_overlay_pck_path);
+		return -1;
+	}
+	LIB_DBG("Created overlay at `%s`", package_node->load_image_overlay_pck_path)
 
-	snprintf(command, sizeof(command), "echo -n %s > %s/path",
-		 package_node->load_image_dtbo_name,
-		 package_node->load_image_overlay_pck_path);
+
 #ifdef ENABLE_LIBDFX_TIME
 	gettimeofday(&load_t0, NULL);
 #endif
-	system(command);
+	// todo(artiepoole): handle errors
+	// Trigger overlay load
+	dfx_set_overlay_path(package_node->load_image_overlay_pck_path,
+						 package_node->load_image_dtbo_name);
 #ifdef ENABLE_LIBDFX_TIME
 	gettimeofday(&load_t1, NULL);
 #endif
-
-	state_dir = opendir("/run/dfx");
-	if (state_dir)
-		closedir(state_dir);
-	else
-		system("mkdir -p /run/dfx");
-
+	// check FPGA state is operating
 	if (!(package_node->flags & DFX_EXTERNAL_CONFIG_EN)) {
-		snprintf(command, sizeof(command),
-			 "cat /sys/class/fpga_manager/fpga0/state >> /run/dfx/state.txt");
-		ret = dfx_state(command, "operating");
-		if (ret) {
-			err = dfx_get_error(command);
-			snprintf(command, sizeof(command), "rmdir %s",
-				 package_node->load_image_overlay_pck_path);
-			system(command);
-			printf("%s: Image configuration failed with error: 0x%x\n",
-			        __func__, err);
+		dfx_get_fpga_state(state_buf, sizeof(state_buf));
+		if (strcmp(state_buf, "operating") != 0) {
+			err = dfx_get_error(path_buf);
+			remove_overlay_dir(package_node->load_image_overlay_pck_path);
+			LIB_ERR("Image configuration failed with error: 0x%x", err);
 			if (package_node->xilplatform == ZYNQMP_PLATFORM)
 				zynqmp_print_err_msg(err);
-			system(command);
+			system(path_buf);
 			ret = -DFX_IMAGE_CONFIG_ERROR;
+			dfx_set_firmware_lookup_path("");
 			goto END;
 		}
 	}
 
-	snprintf(command, sizeof(command), "cat %s/path >> /run/dfx/state.txt",
-		 package_node->load_image_overlay_pck_path);
-	ret = dfx_state(command, package_node->load_image_dtbo_name);
-	if (ret) {
-		snprintf(command, sizeof(command), "rmdir %s",
-			 package_node->load_image_overlay_pck_path);
-		system(command);
+	// Check that the overlay path is still written
+	dfx_get_overlay_path(package_node->load_image_overlay_pck_path, state_buf,
+						 sizeof(state_buf));
+	if (strcmp(state_buf, package_node->load_image_dtbo_name) != 0) {
 		printf("%s: Image configuration failed\n", __func__);
-		ret = -DFX_IMAGE_CONFIG_ERROR;
+		remove_overlay_dir(package_node->load_image_overlay_pck_path);
 		dfx_set_firmware_lookup_path("");
+		ret = -DFX_IMAGE_CONFIG_ERROR;
 	}
 
 END:
@@ -416,10 +726,10 @@ END:
 int dfx_cfg_drivers_load(int package_id)
 {
 	FPGA_NODE *package_node;
-	char command[MAX_CMD_LEN];
+	char path_buf[MAX_CMD_LEN];
 	int len, ret = 0;
-	char *str;
-	DIR *state_dir;
+	char *overlay_dir_path;
+	char state_buf[128] = {};
 #ifdef ENABLE_LIBDFX_TIME
 	struct timeval t1, t0;
 	double time;
@@ -444,35 +754,37 @@ int dfx_cfg_drivers_load(int package_id)
 		goto END;
 	}
 
-	snprintf(command, sizeof(command),
-		 "/sys/kernel/config/device-tree/overlays/%s_driver_%lu",
-		 package_node->package_name, package_node->package_id);
-	len = strlen(command) + 1;
-	str = (char *) calloc((len), sizeof(char));
-	strncpy(str, command, len);
-	package_node->load_drivers_overlay_pck_path = str;
-	snprintf(command, sizeof(command), "mkdir -p %s",
-		 package_node->load_drivers_overlay_pck_path);
-	system(command);
-	snprintf(command, sizeof(command), "echo -n %s > %s/path",
-		 package_node->load_drivers_dtbo_name,
-		 package_node->load_drivers_overlay_pck_path);
-	system(command);
+	// This may not be neccessary - this approach should use the dma buffer
+	// TODO(artiepoole): check this is necessary
+	dfx_set_firmware_lookup_path(package_node->load_drivers_dtbo_path);
 
-	state_dir = opendir("/run/dfx");
-	if (state_dir)
-		closedir(state_dir);
-	else
-		system("mkdir -p /run/dfx");
+	snprintf(path_buf, sizeof(path_buf),
+			 "%s/%s_driver_%lu",
+			 DTBO_ROOT_DIR,
+			 package_node->package_name,
+			 package_node->package_id);
+	len = (int)strlen(path_buf) + 1;
+	overlay_dir_path = (char *) calloc((len), sizeof(char));
+	strncpy(overlay_dir_path, path_buf, len);
+	package_node->load_drivers_overlay_pck_path = overlay_dir_path;
 
-	snprintf(command, sizeof(command), "cat %s/path >> /run/dfx/state.txt",
-		 package_node->load_drivers_overlay_pck_path);
-	ret = dfx_state(command, package_node->load_drivers_dtbo_name);
-	if (ret) {
-		snprintf(command, sizeof(command), "rmdir %s",
-			 package_node->load_drivers_overlay_pck_path);
-		system(command);
+	if (mkdir(package_node->load_image_overlay_pck_path, 0755)) {
+		LIB_ERR("Failed to create overlay dir `%s`",
+				package_node->load_image_overlay_pck_path);
+		return -1;
+	}
+
+	dfx_set_overlay_path(package_node->load_drivers_overlay_pck_path,
+						 package_node->load_drivers_dtbo_name);
+
+	// Check that the overlay path is still written
+	dfx_get_overlay_path(package_node->load_image_overlay_pck_path, state_buf,
+						 sizeof(state_buf));
+	if (strcmp(state_buf, package_node->load_image_dtbo_name) != 0) {
 		printf("%s: Drivers DTBO config failed\n", __func__);
+		remove_overlay_dir(package_node->load_image_overlay_pck_path);
+		// TODO(artiepoole): check this is necessary
+		dfx_set_firmware_lookup_path("");
 		ret = -DFX_DRIVER_CONFIG_ERROR;
 	}
 
@@ -520,10 +832,7 @@ int dfx_cfg_remove(int package_id)
 		FD = opendir(package_node->load_drivers_overlay_pck_path);
 		if (FD) {
 			closedir(FD);
-			snprintf(command, sizeof(command), "rmdir %s",
-				 package_node->load_drivers_overlay_pck_path);
-			system(command);
-
+			remove_overlay_dir(package_node->load_drivers_overlay_pck_path);
 		}
 	}
 
@@ -531,9 +840,7 @@ int dfx_cfg_remove(int package_id)
 		FD = opendir(package_node->load_image_overlay_pck_path);
 		if (FD) {
 			closedir(FD);
-			snprintf(command, sizeof(command), "rmdir %s",
-				 package_node->load_image_overlay_pck_path);
-			system(command);
+			remove_overlay_dir(package_node->load_image_overlay_pck_path);
 		}
 	}
 
@@ -596,8 +903,8 @@ END:
 	return ret;
 }
 
-/* This API populates buffer with {Node ID, Unique ID, Parent Unique ID, Function ID}
- * for each applicable NodeID in the system.
+/* This API populates buffer with {Node ID, Unique ID, Parent Unique ID,
+ * Function ID} for each applicable NodeID in the system.
  *
  * buffer: User buffer address
  *
@@ -888,7 +1195,7 @@ static struct dfx_package_node *create_package()
 	FPGA_NODE *package_node;
 	DIR *FD;
 
-	FD = opendir("/sys/kernel/config/device-tree/overlays/");
+	FD = opendir(DTBO_ROOT_DIR);
 	if (FD)
 		closedir(FD);
 	else {
@@ -989,61 +1296,16 @@ static int destroy_package(int package_id)
 	return 0;
 }
 
-static int dfx_state(char *cmd, char *state)
+/**
+ *
+ * @param state_buf buffer already containing the state string from fpga
+ * @return the contents of state_buf converted to signed integer
+ */
+static int dfx_get_error(const char *state_buf)
 {
-	char buf[PLATFORM_STR_LEN];
-	FILE *fptr;
-	int len;
-	DIR * state_dir;
-
-	state_dir = opendir("/run/dfx");
-	if (state_dir)
-		closedir(state_dir);
-	else
-		system("mkdir -p /run/dfx");
-
-	system(cmd);
-	len = strlen(state) + 1;
-	fptr = fopen("/run/dfx/state.txt", "r");
-	if (fptr) {
-		fgets(buf, len, fptr);
-		fclose(fptr);
-		system("rm /run/dfx/state.txt");
-		if (!strcmp(buf, state))
-			return 0;
-		else
-			return 1;
-	}
-
-	return 1;
-}
-
-static int dfx_get_error(char *cmd)
-{
-	char string[PLATFORM_STR_LEN];
-	FILE *fp;
-	int c;
-	DIR * state_dir;
-
-	state_dir = opendir("/run/dfx");
-	if (state_dir)
-		closedir(state_dir);
-	else
-		system("mkdir -p /run/dfx");
-
-	system(cmd);
-	fp = fopen("/run/dfx/state.txt", "r");
-	c = getc(fp);
-	while(c!=EOF) {
-		fscanf(fp, "%s", string);
-		c = getc(fp);
-	}
-
-	fclose(fp);
-
-	system("rm /run/dfx/state.txt");
-
-    return (int)strtol(string, NULL, 0);
+	// todo(artiepoole): add suggestions or parse the file properly and catch if
+	// not int
+	return (int) strtol(state_buf, NULL, 0);
 }
 
 static int dfx_package_load_dmabuf(struct dfx_package_node *package_node,
@@ -1403,7 +1665,7 @@ static char *get_file_name_from_path(char *full_path)
  *
  * @param file_path the full path to the file to be loaded
  */
-void dfx_set_firmware_lookup_path(const char* file_path)
+void dfx_set_firmware_lookup_path(const char *file_path)
 {
 	char path_copy[512];
 	char *parent_dir;
@@ -1411,37 +1673,39 @@ void dfx_set_firmware_lookup_path(const char* file_path)
 	const char *lookup_control = "/sys/module/firmware_class/parameters/path";
 
 	if (!file_path) {
-		printf("dfx_set_firmware_lookup_path: path provided is NULL");
+		LIB_ERR("path provided is NULL");
 		return;
 	}
 
 	if (strlen(file_path) >= sizeof(path_copy)) {
-		printf("dfx_set_firmware_lookup_path: ERROR: path provided is too long, truncating");
+		LIB_ERR("path provided is too long, truncating");
 	}
 
 	strlcpy(path_copy, file_path, sizeof(path_copy));
+
 	if (file_path[0]) {
-		printf("dfx_set_firmware_lookup_path: Setting lookup path for `%s`\n",
-			   file_path);
+		LIB_DBG("Setting lookup path for `%s`\n",
+				file_path);
 	}
 
 	// get parent dir
 	parent_dir = dirname(path_copy);
 	if (!strcmp(".", parent_dir)) {
 		// clear the parameter - it is invalid anyway
-		parent_dir="";
+		parent_dir = "";
 	}
 
 	fd = open(lookup_control, O_WRONLY);
 	if (fd < 0) {
-		printf("dfx_set_firmware_lookup_path: ERROR: failed to open firmware path parameter\n");
+		LIB_ERR("failed to open firmware path parameter\n");
 		return;
 	}
 
 	// set lookup path to firmware dir
-	printf("dfx_set_firmware_lookup_path: writing `%s` to %s\n", parent_dir, lookup_control);
+	LIB_DBG("writing `%s` to %s\n", parent_dir,
+		   lookup_control);
 	if (write(fd, parent_dir, strlen(parent_dir)) < 0) {
-		printf("dfx_set_firmware_lookup_path: failed to write firmware lookup path\n");
+		LIB_ERR("failed to write firmware lookup path\n");
 		close(fd);
 		return;
 	}
